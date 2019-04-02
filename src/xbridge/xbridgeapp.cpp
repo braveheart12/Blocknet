@@ -3,6 +3,13 @@
 
 #include "xbridgeapp.h"
 #include "xbridgeexchange.h"
+#include "xbridgewalletconnector.h"
+#include "xbridgewalletconnectorbtc.h"
+#include "xbridgecryptoproviderbtc.h"
+#include "xbridgewalletconnectorbch.h"
+#include "xbridgewalletconnectordgb.h"
+#include "xrouter/xrouterapp.h"
+
 #include "util/xutil.h"
 #include "util/logger.h"
 #include "util/settings.h"
@@ -20,11 +27,6 @@
 #include "wallet.h"
 #include "servicenodeman.h"
 #include "activeservicenode.h"
-#include "xbridgewalletconnector.h"
-#include "xbridgewalletconnectorbtc.h"
-#include "xbridgecryptoproviderbtc.h"
-#include "xbridgewalletconnectorbch.h"
-#include "xbridgewalletconnectordgb.h"
 #include "sync.h"
 #include "spork.h"
 
@@ -33,6 +35,7 @@
 #include <numeric>
 #include <random>
 #include <string.h>
+#include <regex>
 
 #include <boost/chrono/chrono.hpp>
 #include <boost/thread/thread.hpp>
@@ -258,11 +261,6 @@ App::App()
 //*****************************************************************************
 App::~App()
 {
-    stop();
-
-#ifdef WIN32
-    WSACleanup();
-#endif
 }
 
 //*****************************************************************************
@@ -379,7 +377,6 @@ bool App::init(int argc, char *argv[])
 bool App::stop()
 {
     bool s = m_p->stop();
-    disconnectWallets();
     return s;
 }
 
@@ -407,7 +404,8 @@ bool App::disconnectWallets()
 
     std::set<std::string> noWallets;
     xbridge::Exchange::instance().loadWallets(noWallets);
-    sendServicePing();
+    std::vector<std::string> nonWalletServices = xrouter::App::instance().getServicesList();
+    sendServicePing(nonWalletServices);
 
     return true;
 }
@@ -492,7 +490,7 @@ void App::Impl::onSend(const std::vector<unsigned char> & id, const std::vector<
     {
         LOCK(cs_vNodes);
         for (CNode * pnode : vNodes) {
-            if (pnode->fSuccessfullyConnected && !pnode->fDisconnect)
+            if (pnode->SuccessfullyConnected() && !pnode->Disconnecting())
                 pnode->PushMessage("xbridge", msg);
         }
     }
@@ -2032,7 +2030,7 @@ void App::unwatchTraderDeposit(TransactionPtr tr) {
  * @return
  */
 //******************************************************************************
-bool App::sendServicePing()
+bool App::sendServicePing(std::vector<std::string> &nonWalletServices)
 {
     CServicenode *pmn = nullptr;
     {
@@ -2054,8 +2052,6 @@ bool App::sendServicePing()
     Exchange & e = Exchange::instance();
     std::map<std::string, bool> nodup;
 
-    // TODO Add xrouter services
-    std::vector<std::string> nonWalletServices;// = xrouter.services() {"xrSendTransaction","xrGetBlock","xrGetTransaction"};
     for (const auto &s : nonWalletServices)
     {
         nodup[s] = true;
@@ -2142,6 +2138,36 @@ std::map<::CPubKey, App::XWallets> App::allServices()
 {
     LOCK(m_p->m_xwalletsLocker);
     return m_p->m_xwallets;
+}
+
+//******************************************************************************
+/**
+ * @brief Returns all wallets supported by the network.
+ * @return
+ */
+//******************************************************************************
+std::map<::CPubKey, App::XWallets> App::walletServices()
+{
+    LOCK(m_p->m_xwalletsLocker);
+
+    std::regex rwallet("^[^:]+$"); // match wallets
+    std::smatch m;
+    std::map<::CPubKey, App::XWallets> ws;
+
+    for (const auto & item : m_p->m_xwallets) {
+        const auto & services = item.second.services();
+        std::vector<std::string> tmp{services.begin(), services.end()};
+        std::set<std::string> xwallets;
+        for (const auto & s : tmp) {
+            if (!std::regex_match(s, m, rwallet) || s == xrouter::xr || s == xrouter::xrs)
+                continue;
+            xwallets.insert(s);
+        }
+        App::XWallets & x = ws[item.first];
+        ws[item.first] = XWallets{x.version(), x.nodePubKey(), xwallets};
+    }
+
+    return ws;
 }
 
 //******************************************************************************
@@ -2314,7 +2340,16 @@ bool App::Impl::addNodeServices(const ::CPubKey & nodePubKey,
                                 const uint32_t version)
 {
     LOCK(m_xwalletsLocker);
-    m_xwallets[nodePubKey] = XWallets{version, nodePubKey, std::set<std::string>{services.begin(), services.end()}};
+
+    std::set<std::string> validServices;
+    std::regex r("^[a-zA-Z0-9\\-:\\$]+$");
+    std::smatch m;
+    for (const auto & s : services) { // validate service names
+        if (std::regex_match(s, m, r))
+            validServices.insert(s);
+    }
+
+    m_xwallets[nodePubKey] = XWallets{version, nodePubKey, validServices};
     return true;
 }
 
