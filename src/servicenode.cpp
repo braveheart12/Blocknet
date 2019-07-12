@@ -232,8 +232,12 @@ void CServicenode::Check(bool forceCheck)
             TRY_LOCK(cs_main, lockMain);
             if (!lockMain) return;
 
+            try {
             if (!AcceptableInputs(mempool, state, CTransaction(tx), false, NULL)) {
                 activeState = SERVICENODE_VIN_SPENT;
+                return;
+            }
+            } catch (...) {
                 return;
             }
         }
